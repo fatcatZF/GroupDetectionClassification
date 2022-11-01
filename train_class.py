@@ -13,8 +13,8 @@ from torch.optim import lr_scheduler
 from utils import *
 from models import *
 
-from sknetwork.topology import get_connected_components
-from scipy import sparse
+import networkx as nx 
+from networkx import connected_components
 
 
 parser = argparse.ArgumentParser()
@@ -131,22 +131,16 @@ optimizer = optim.SGD(list(encoder.parameters()), lr=args.lr, momentum=0.9)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_decay, gamma=args.gamma)
 
 
-def train(epoch, best_val_recall):
+def train(epoch, best_F1):
     t = time.time()
     loss_train = []
-    acc_train = []
-    gp_train = []
-    ngp_train = []
-    gr_train = []
-    ngr_train = []
+    recall_train = []
+    precision_train = []
+    F1_train = []
     loss_val = []
-    acc_val = []
-    gp_val = []
-    ngp_val = []
-    gr_val = []
-    ngr_val = []
-    F1_val = []
     recall_val = []
+    precision_val = []
+    F1_val = []
 
     encoder.train()
 
@@ -173,7 +167,11 @@ def train(epoch, best_val_recall):
 
         example = example.float()
         logits = encoder(example, rel_rec, rel_send)
-        #shape: [n_batch=1, n_edges, n_edgetypes]
+        #shape: [n_batch=1, n_edges, n_edgetypes=2]
+        z = F.softmax(logits, dim=-1)
+        #shape: [n_batch=1, n_edges, n_edgetypes=2]
+        z = z[:,:,1]
+        #shape: [n_batch=1, n_edges]
 
         output = logits.view(logits.size(0)*logits.size(1),-1)
         target = label.view(-1)
@@ -192,15 +190,24 @@ def train(epoch, best_val_recall):
             optimizer.zero_grad()
             accumulation_steps = min(args.batch_size, len(examples_train)-idx_count)
 
-        acc = edge_accuracy(logits, label)
-        acc_train.append(acc)
-        gp, ngp = edge_precision(logits, label)
-        gp_train.append(gp)
-        ngp_train.append(ngp)
+        sims_label = label2mat(label.flatten(), num_atoms)
+        sims_label_G = nx.from_numpy_array(sims_label.astype("int"))
+        clusters_label = list(connected_components(sims_label_G))
+        clusters_label = [list(c) for c in clusters_label]
 
-        gr,ngr = edge_recall(logits, label)
-        gr_train.append(gr)
-        ngr_train.append(ngr)
+        sims_predict = label2mat(z.flatten(), num_atoms)
+        #shape: [n_atoms, n_atoms]
+        sims_predict = (sims_predict>0.5).astype("int")
+        sims_predict_G = nx.from_numpy_array(sims_predict)
+        clusters_predict = list(connected_components(sims_predict_G))
+        clusters_predict = [list(c) for c in clusters_predict]
+
+        recall, precision, F1 = compute_groupMitre(clusters_label, clusters_predict)
+        recall_train.append(recall)
+        precision_train.append(precision)
+        F1_train.append(F1)
+
+
 
     encoder.eval()
     valid_indices = np.arange(len(examples_valid))
@@ -219,6 +226,10 @@ def train(epoch, best_val_recall):
                 rel_rec, rel_send = rel_rec.cuda(), rel_send.cuda()
             example = example.float()
             logits = encoder(example, rel_rec, rel_send)
+            z = F.softmax(logits, dim=-1)
+            #shape: [n_batch=1, n_edges, n_edgetypes=2]
+            z = z[:,:,1]
+            #shape: [n_batch=1, n_edges]
             output = logits.view(logits.size(0)*logits.size(1),-1)
             target = label.view(-1)
             loss_current = F.cross_entropy(output, target.long(), weight=cross_entropy_weight)
@@ -227,86 +238,60 @@ def train(epoch, best_val_recall):
             example = example.cpu()
             rel_rec, rel_send = rel_rec.cpu(), rel_send.cpu()
             
-            acc = edge_accuracy(logits, label)
-            acc_val.append(acc)
-            gp, ngp = edge_precision(logits, label)
-            gp_val.append(gp)
-            ngp_val.append(ngp)
-            
-            gr,ngr = edge_recall(logits, label)
-            gr_val.append(gr)
-            ngr_val.append(ngr)
-            
             loss_val.append(loss_current.item())
 
-            if gr==0 or gp==0:
-                F1_g = 0.
-            else:
-                F1_g = 2*(gr*gp)/(gr+gp)
-                
-            if ngr==0 or ngp==0:
-                F1_ng = 0.
-            else:
-                F1_ng = 2*(ngr*ngp)/(ngr+ngp)
-                
-            #F1 = args.group_weight*F1_g+(1-args.group_weight)*F1_ng
-            
-            ave_recall = args.grecall_weight*gr+(1-args.grecall_weight)*ngr
-            recall_val.append(ave_recall)
+            sims_label = label2mat(label.flatten(), num_atoms)
+            sims_label_G = nx.from_numpy_array(sims_label.astype("int"))
+            clusters_label = list(connected_components(sims_label_G))
+            clusters_label = [list(c) for c in clusters_label]
 
-            F1_val.append(F1_g)
+            sims_predict = label2mat(z.flatten(), num_atoms)
+            #shape: [n_atoms, n_atoms]
+            sims_predict = (sims_predict>0.5).astype("int")
+            sims_predict_G = nx.from_numpy_array(sims_predict)
+            clusters_predict = list(connected_components(sims_predict_G))
+            clusters_predict = [list(c) for c in clusters_predict]
+
+            recall, precision, F1 = compute_groupMitre(clusters_label, clusters_predict)
+            recall_val.append(recall)
+            precision_val.append(precision)
+            F1_val.append(F1)
 
     
     print("Epoch: {:04d}".format(epoch),
           "loss_train: {:.10f}".format(np.mean(loss_train)),
-          "acc_train: {:.10f}".format(np.mean(acc_train)),
-          "gp_train: {:.10f}".format(np.mean(gp_train)),
-          "ngp_train: {:.10f}".format(np.mean(ngp_train)),
-          "gr_train: {:.10f}".format(np.mean(gr_train)),
-          "ngr_train: {:.10f}".format(np.mean(ngr_train)),
+          "recall_train: {:.10f}".format(np.mean(recall_train)),
+          "precision_train: {:.10f}".format(np.mean(precision_train)),
+          "F1_train: {:.10f}".format(np.mean(F1_train)),
           "loss_val: {:.10f}".format(np.mean(loss_val)),
-          "acc_val: {:.10f}".format(np.mean(acc_val)),
-          "gp_val: {:.10f}".format(np.mean(gp_val)),
-          "ngp_val: {:.10f}".format(np.mean(ngp_val)),
-          "gr_val: {:.10f}".format(np.mean(gr_val)),
-          "ngr_val: {:.10f}".format(np.mean(ngr_val)),
-          "F1_val: {:.10f}".format(np.mean(F1_val)),
-          "recall_val: {:.10f}".format(np.mean(recall_val)))
-    if args.save_folder and np.mean(recall_val) > best_val_recall:
+          "recall_val: {:.10f}".format(np.mean(recall_val)),
+          "precision_val: {:.10f}".format(np.mean(precision_val)),
+          "F1_val: {:.10f}".format(np.mean(F1_val)))
+    if args.save_folder and np.mean(F1_val) > best_F1:
         torch.save(encoder, encoder_file)
         print("Best model so far, saving...")
         print("Epoch: {:04d}".format(epoch),
-              "loss_train: {:.10f}".format(np.mean(loss_train)),
-              "acc_train: {:.10f}".format(np.mean(acc_train)),
-              "gp_train: {:.10f}".format(np.mean(gp_train)),
-              "ngp_train: {:.10f}".format(np.mean(ngp_train)),
-              "gr_train: {:.10f}".format(np.mean(gr_train)),
-              "ngr_train: {:.10f}".format(np.mean(ngr_train)),
-              "loss_val: {:.10f}".format(np.mean(loss_val)),
-              "acc_val: {:.10f}".format(np.mean(acc_val)),
-              "gp_val: {:.10f}".format(np.mean(gp_val)),
-              "ngp_val: {:.10f}".format(np.mean(ngp_val)),
-              "gr_val: {:.10f}".format(np.mean(gr_val)),
-              "ngr_val: {:.10f}".format(np.mean(ngr_val)),
-              "F1_val: {:.10f}".format(np.mean(F1_val)),
-              "recall_val: {:.10f}".format(np.mean(recall_val)),
-              file=log)
+          "loss_train: {:.10f}".format(np.mean(loss_train)),
+          "recall_train: {:.10f}".format(np.mean(recall_train)),
+          "precision_train: {:.10f}".format(np.mean(precision_train)),
+          "F1_train: {:.10f}".format(np.mean(F1_train)),
+          "loss_val: {:.10f}".format(np.mean(loss_val)),
+          "recall_val: {:.10f}".format(np.mean(recall_val)),
+          "precision_val: {:.10f}".format(np.mean(precision_val)),
+          "F1_val: {:.10f}".format(np.mean(F1_val)), file=log)
         log.flush()
 
     
-    return np.mean(recall_val)
+    return np.mean(F1_val)
 
 
 
 
 def test():
     t = time.time()
-    loss_test = []
-    acc_test = []
-    gp_test = []
-    ngp_test = []
-    gr_test = []
-    ngr_test = []
+    recall_test = []
+    precision_test = []
+    F1_test = []
     
     encoder = torch.load(encoder_file)
     encoder.eval()
@@ -326,121 +311,39 @@ def test():
                 rel_rec, rel_send = rel_rec.cuda(), rel_send.cuda()
             example = example.float()
             logits = encoder(example, rel_rec, rel_send)
+            z = F.softmax(logits, dim=-1)
+            #shape: [n_batch=1, n_edges, n_edgetypes=2]
+            z = z[:,:,1]
+            #shape: [n_batch=1, n_edges]
             
-            output = logits.view(logits.size(0)*logits.size(1),-1)
-            target = label.view(-1)
-            
-            acc = edge_accuracy(logits, label)
-            acc_test.append(acc)
-            gp, ngp = edge_precision(logits, label)
-            gp_test.append(gp)
-            ngp_test.append(ngp)
-            
-            gr,ngr = edge_recall(logits, label)
-            gr_test.append(gr)
-            ngr_test.append(ngr)
+            sims_label = label2mat(label.flatten(), num_atoms)
+            sims_label_G = nx.from_numpy_array(sims_label.astype("int"))
+            clusters_label = list(connected_components(sims_label_G))
+            clusters_label = [list(c) for c in clusters_label]
+
+            sims_predict = label2mat(z.flatten(), num_atoms)
+            #shape: [n_atoms, n_atoms]
+            sims_predict = (sims_predict>0.5).astype("int")
+            sims_predict_G = nx.from_numpy_array(sims_predict)
+            clusters_predict = list(connected_components(sims_predict_G))
+            clusters_predict = [list(c) for c in clusters_predict]
+
+            recall, precision, F1 = compute_groupMitre(clusters_label, clusters_predict)
+            recall_test.append(recall)
+            precision_test.append(precision)
+            F1_test.append(F1)
+
 
     
     print('--------------------------------')
     print('--------Testing-----------------')
     print('--------------------------------')
-    print('acc_test: {:.10f}'.format(np.mean(acc_test)),
-          "gp_test: {:.10f}".format(np.mean(gp_test)),
-          "ngp_test: {:.10f}".format(np.mean(ngp_test)),
-          "gr_test: {:.10f}".format(np.mean(gr_test)),
-          "ngr_test: {:.10f}".format(np.mean(ngr_test))
-          )
+    print(
+          "recall_train: {:.10f}".format(np.mean(recall_test)),
+          "precision_train: {:.10f}".format(np.mean(precision_test)),
+          "F1_train: {:.10f}".format(np.mean(F1_test)))
 
 
-
-
-def test_gmitre():
-    """
-    test group mitre recall and precision   
-    """
-
-    
-    encoder = torch.load(encoder_file)
-    encoder.eval()    
-    test_indices = np.arange(len(examples_test))
-    
-    gIDs = []
-    predicted_gr = []
-    
-    precision_all = []
-    recall_all = []
-    F1_all = []
-
-
-    with torch.no_grad():
-        for idx in test_indices:
-            example = examples_test[idx]
-            label = labels_test[idx] #shape: [n_edges]
-            example = example.unsqueeze(0) #shape: [1, n_atoms, n_timesteps, n_in]
-            n_atoms = example.size(1)
-            rel_rec, rel_send = create_edgeNode_relation(n_atoms, self_loops=False)
-            rel_rec, rel_send = rel_rec.float(), rel_send.float()
-            example = example.float()
-            
-            label = torch.diag_embed(label) #shape: [n_edges, n_edges]
-            label = label.float()
-            label_converted = torch.matmul(rel_send.t(), 
-                                           torch.matmul(label, rel_rec))
-            label_converted = label_converted.cpu().detach().numpy()
-            #shape: [n_atoms, n_atoms]
-            
-            if label_converted.sum()==0:
-                gID = list(range(label_converted.shape[1]))
-                gIDs.append(gID)
-            else:
-                gID = list(get_connected_components(label_converted))
-                gIDs.append(gID)
-            
-            if args.cuda:
-                example = example.cuda()
-                rel_rec, rel_send = rel_rec.cuda(), rel_send.cuda()
-                
-            Z = encoder(example, rel_rec, rel_send)
-            Z = F.softmax(Z, dim=-1)
-            #shape: [1, n_edges, 2]
-            
-            group_prob = Z[:,:,1] #shape: [1, n_edges]
-            group_prob = group_prob.squeeze(0) #shape: [n_edges]
-            group_prob = torch.diag_embed(group_prob) #shape: [n_edges, n_edges]
-            group_prob = torch.matmul(rel_send.t(), torch.matmul(group_prob, rel_rec))
-            #shape: [n_atoms, n_atoms]
-            group_prob = 0.5*(group_prob+group_prob.T)
-            group_prob = (group_prob>0.5).int()
-            group_prob = group_prob.cpu().detach().numpy()
-            
-            if group_prob.sum()==0:
-                pred_gIDs = np.arange(n_atoms)
-            else:
-                #group_prob = sparse.csr_matrix(group_prob)
-                #pred_gIDs = louvain.fit_transform(group_prob)
-                pred_gIDs = list(get_connected_components(group_prob))
-                
-                
-            predicted_gr.append(pred_gIDs)
-            
-            recall, precision, F1 = compute_groupMitre_labels(gID, pred_gIDs)
-            
-            recall_all.append(recall)
-            precision_all.append(precision)
-            F1_all.append(F1)
-
-        average_recall = np.mean(recall_all)
-        average_precision = np.mean(precision_all)
-        average_F1 = np.mean(F1_all)
-
-    print("Average recall: ", average_recall)
-    print("Average precision: ", average_precision)
-    print("Average F1: ", average_F1)
-    
-    print("Average recall: {:.10f}".format(average_recall),
-          "Average precision: {:.10f}".format(average_precision),
-          "Average_F1: {:.10f}".format(average_F1),
-          file=log)
 
         
         
@@ -448,18 +351,16 @@ def test_gmitre():
 #Train model
 
 t_total = time.time()
-best_val_recall = 0.
+best_F1 = 0.
 best_epoch = 0
 
 for epoch in range(args.epochs):
-    val_recall = train(epoch, best_val_recall)
-    if val_recall > best_val_recall:
-        best_val_recall = val_recall
+    val_F1 = train(epoch, best_F1)
+    if val_F1 > best_F1:
+        best_F1 = val_F1
         best_epoch = epoch
         
 print("Optimization Finished!")
 print("Best Epoch: {:04d}".format(best_epoch))
 
 test()
-
-test_gmitre()

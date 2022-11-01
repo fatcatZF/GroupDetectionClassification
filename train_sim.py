@@ -56,6 +56,8 @@ parser.add_argument("--gamma", type=float, default=0.5,
                     help="LR decay factor.")
 parser.add_argument("--weight-decay", type=float, default=0.01,
                     help="L2 Penalty.")
+parser.add_argument("--use-all", action="store_true", default=False,
+                     help="use all the data sets.")
 
 
 
@@ -86,6 +88,8 @@ else:
 #Load data
 data_folder = os.path.join("data/pedestrian/", args.suffix)
 data_folder = os.path.join(data_folder, args.split)
+if args.use_all:
+    data_folder = os.path.join("data/pedestrian/all", args.suffix)
 
 
 with open(os.path.join(data_folder, "tensors_train.pkl"), 'rb') as f:

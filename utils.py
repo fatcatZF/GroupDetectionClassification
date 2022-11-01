@@ -199,6 +199,8 @@ def label2mat(label, n_atoms):
                                            torch.matmul(label, rel_rec))
     sims = label_converted.cpu().detach().numpy()
     #shape: [n_atoms, n_atoms]
+    sims = 0.5*(sims+sims.T)
+    #to make the matrix symmetric
     return sims
 
 

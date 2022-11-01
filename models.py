@@ -225,6 +225,7 @@ class EncoderSym(nn.Module):
         senders = torch.matmul(rel_send, x)
         edges = [(senders*D*receivers).sum(-1)/senders.size(-1) for D in self.edge_extractors]
         edges = torch.stack(edges).permute(1,2,0)
+        #edges = receivers*senders
         return edges
 
     def forward(self, inputs, rel_rec, rel_send):
