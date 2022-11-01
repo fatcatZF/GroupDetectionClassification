@@ -184,6 +184,25 @@ def compute_groupMitre_labels(target, predict):
     return recall, precision, F1
 
 
+def label2mat(label, n_atoms):
+    """
+    convert edge labels to matrix
+    args:
+      label, shape: [n_edges]
+      n_atoms: the number of atoms
+    """
+    rel_rec, rel_send = create_edgeNode_relation(n_atoms, self_loops=False)
+    rel_rec, rel_send = rel_rec.float(), rel_send.float()
+    label = torch.diag_embed(label) #shape: [n_edges, n_edges]
+    label = label.float()
+    label_converted = torch.matmul(rel_send.t(), 
+                                           torch.matmul(label, rel_rec))
+    sims = label_converted.cpu().detach().numpy()
+    #shape: [n_atoms, n_atoms]
+    return sims
+
+
+
 
 """Correlation Clustering"""
 def compute_all_clusterings(indices):
